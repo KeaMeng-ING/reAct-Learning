@@ -1,0 +1,16 @@
+{
+  "name": "Scrim-s05pksn",
+  "description": "https://scrimba.com/the-ai-engineer-path-c02v/~02g",
+  "type": "module",
+  "scripts": {
+    "start": "vite",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@google/genai": "latest",
+    "dotenv": "^17.4.2",
+    "vite": "latest"
+  }
+}
