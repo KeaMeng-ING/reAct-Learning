@@ -1,8 +1,176 @@
 <!doctype html>
 <html>
-    <head>
-    </head>
-    <body>
-        <script type="module" src="index.js"></script>
-    </body>
+  <head>
+    <meta charset="utf-8" />
+    <title>ReAct Agent</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      #log {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+        min-height: 200px;
+      }
+      .msg {
+        padding: 0.5rem 0.75rem;
+        border-radius: 8px;
+        white-space: pre-wrap;
+      }
+      .user {
+        align-self: flex-end;
+        background: #2563eb;
+        color: white;
+      }
+      .answer {
+        align-self: flex-start;
+        background: #f1f5f9;
+      }
+      .tool {
+        align-self: flex-start;
+        background: #fef9c3;
+        font-family: monospace;
+        font-size: 0.85rem;
+      }
+      .error {
+        align-self: flex-start;
+        background: #fee2e2;
+        color: #991b1b;
+      }
+      .loading {
+        align-self: flex-start;
+        background: #f1f5f9;
+        display: flex;
+        gap: 4px;
+      }
+      .loading span {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #94a3b8;
+        animation: bounce 1.2s infinite ease-in-out;
+      }
+      .loading span:nth-child(2) {
+        animation-delay: 0.15s;
+      }
+      .loading span:nth-child(3) {
+        animation-delay: 0.3s;
+      }
+      @keyframes bounce {
+        0%,
+        80%,
+        100% {
+          transform: scale(0.6);
+          opacity: 0.5;
+        }
+        40% {
+          transform: scale(1);
+          opacity: 1;
+        }
+      }
+      form {
+        display: flex;
+        gap: 0.5rem;
+      }
+      input {
+        flex: 1;
+        padding: 0.5rem;
+      }
+      button {
+        padding: 0.5rem 1rem;
+      }
+      button:disabled {
+        opacity: 0.5;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>ReAct Agent</h1>
+    <div id="log"></div>
+    <form id="chat-form">
+      <input
+        id="query"
+        type="text"
+        placeholder="Ask about the weather..."
+        autocomplete="off"
+      />
+      <button id="submit" type="submit">Send</button>
+    </form>
+    <script type="module">
+      import { agent } from "./index.js";
+
+      const log = document.getElementById("log");
+      const form = document.getElementById("chat-form");
+      const input = document.getElementById("query");
+      const submitBtn = document.getElementById("submit");
+
+      let loadingEl = null;
+
+      function addMessage(text, className) {
+        const div = document.createElement("div");
+        div.className = `msg ${className}`;
+        div.textContent = text;
+        log.appendChild(div);
+        log.scrollTop = log.scrollHeight;
+        return div;
+      }
+
+      function showLoading() {
+        const div = document.createElement("div");
+        div.className = "msg loading";
+        div.innerHTML = "<span></span><span></span><span></span>";
+        log.appendChild(div);
+        log.scrollTop = log.scrollHeight;
+        loadingEl = div;
+      }
+
+      function hideLoading() {
+        loadingEl?.remove();
+        loadingEl = null;
+      }
+
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const query = input.value.trim();
+        if (!query) return;
+
+        addMessage(query, "user");
+        input.value = "";
+        submitBtn.disabled = true;
+        showLoading();
+
+        try {
+          await agent(query, (event) => {
+            hideLoading();
+            if (event.type === "tool-call") {
+              addMessage(
+                `Calling ${event.name}(${JSON.stringify(event.args)})`,
+                "tool",
+              );
+              showLoading();
+            } else if (event.type === "tool-result") {
+              addMessage(`${event.name} -> ${event.result}`, "tool");
+              showLoading();
+            } else if (event.type === "answer") {
+              addMessage(event.message, "answer");
+            } else if (event.type === "error") {
+              addMessage(event.message, "error");
+            }
+          });
+        } catch (err) {
+          hideLoading();
+          addMessage(`Unexpected error: ${err.message ?? err}`, "error");
+        } finally {
+          hideLoading();
+          submitBtn.disabled = false;
+          input.focus();
+        }
+      });
+    </script>
+  </body>
 </html>

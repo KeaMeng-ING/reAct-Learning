@@ -1,114 +1,118 @@
-import "dotenv/config";
 import { GoogleGenAI } from "@google/genai";
-import { getCurrentWeather, getLocation } from "./tools.js";
+import { getCurrentWeather, getLocation, tools } from "./tools.js";
 
-export const ai = new GoogleGenAI({
-  apiKey: process.env.VITE_GEMINI_API_KEY,
-});
+// Node (CLI) reads process.env via dotenv; the browser (Vite) exposes
+// VITE_-prefixed vars on import.meta.env instead. Support both.
+const isBrowser = typeof document !== "undefined";
+if (!isBrowser) {
+  await import("dotenv/config");
+}
+const apiKey = isBrowser
+  ? import.meta.env.VITE_GEMINI_API_KEY
+  : process.env.VITE_GEMINI_API_KEY;
 
-/**
- * Goal - build an agent that can answer any questions that might require knowledge about my current location and the current weather at my location.
- */
+export const ai = new GoogleGenAI({ apiKey });
 
 const availableFunctions = {
   getCurrentWeather,
   getLocation,
 };
 
-const systemPrompt = `
-You cycle through Thought, Action, PAUSE, Observation. At the end of the loop you output a final Answer. Your final answer should be highly specific to the observations you have from running
-the actions.
-1. Thought: Describe your thoughts about the question you have been asked.
-2. Action: run one of the actions available to you - then return PAUSE.
-3. PAUSE
-4. Observation: will be the result of running those actions.
-
-Available actions:
-- getCurrentWeather: 
-    E.g. getCurrentWeather: Salt Lake City
-    Returns the current weather of the location specified.
-- getLocation:
-    E.g. getLocation: null
-    Returns user's location details. No arguments needed.
-
-Here is the format you should follow for your output:
-Thought: <Your thoughts about the question>
-Action: <The action you want to run, or "none" if you don't need to run any actions>
-PAUSE
-
-Example session:
-Question: Please give me some ideas for activities to do this afternoon.
-Thought: I should look up the user's location so I can give location-specific activity ideas.
-Action: getLocation: null
-PAUSE
-
-You will be called again with something like this:
-Observation: "New York City, NY"
-
-Then you loop again:
-Thought: To get even more specific activity ideas, I should get the current weather at the user's location.
-Action: getCurrentWeather: New York City
-PAUSE
-
-You'll then be called again with something like this:
-Observation: { location: "New York City, NY", forecast: ["sunny"] }
-
-You then output:
-Answer: <Suggested activities based on sunny weather that are highly specific to New York City and surrounding areas.>
-`;
-
-async function agent(query) {
-  const messages = [
-    {
-      role: "user",
-      parts: [{ text: query }],
+export async function agent(query, onEvent = () => {}) {
+  // Chat keeps the message history for us (the Gemini equivalent of the runner)
+  const chat = ai.chats.create({
+    model: "gemini-3-flash-preview",
+    config: {
+      systemInstruction:
+        "You are a helpful AI agent. Give highly specific answers based on the information you're provided. Prefer to gather information with the tools provided to you rather than giving basic, generic answers.",
+      thinkingConfig: {
+        thinkingBudget: 0,
+      },
+      tools,
     },
-  ];
+  });
 
   const MAX_ITERATIONS = 5;
-  const actionRegex = /^Action: (\w+): (.*)$/;
+  let response;
+
+  try {
+    response = await chat.sendMessage({ message: query });
+  } catch (err) {
+    const message = `Sorry, I couldn't reach the model: ${err.message ?? err}`;
+    onEvent({ type: "error", message });
+    return message;
+  }
 
   for (let i = 0; i < MAX_ITERATIONS; i++) {
     console.log(`Iteration ${i + 1}`);
-    const response = await ai.models.generateContent({
-      model: "gemini-3-flash-preview", // Update the model
-      config: {
-        systemInstruction: systemPrompt,
-        thinkingConfig: {
-          thinkingBudget: 0,
-        },
-      },
-      contents: messages,
-    });
+    console.log("Model response:", response.candidates[0].content);
 
-    const responseText = response.text;
-    messages.push({
-      role: "MODEL",
-      parts: [{ text: responseText }],
-    });
-    const responseLines = responseText.split("\n");
-    const foundActionStr = responseLines.find((line) => actionRegex.test(line));
+    const functionCalls = response.functionCalls ?? [];
 
-    if (foundActionStr) {
-      const actions = actionRegex["exec"](foundActionStr);
-      const [_, action, actionArgs] = actions;
+    // No function calls -> the model is done, return its final text answer
+    if (functionCalls.length === 0) {
+      console.log("Final answer:", response.text);
+      onEvent({ type: "answer", message: response.text });
+      return response.text;
+    }
 
-      if (!availableFunctions.hasOwnProperty(action)) {
-        throw new Error(`Action ${action} is not available.`);
-      }
-      const observation = await availableFunctions[action](actionArgs);
-      messages.push({
-        role: "MODEL",
-        parts: [{ text: `Observation: ${observation}` }],
+    // Execute each function call and send the results back
+    const functionResponseParts = [];
+    for (const functionCall of functionCalls) {
+      console.log(
+        `Calling ${functionCall.name}(${JSON.stringify(functionCall.args)})`,
+      );
+      onEvent({
+        type: "tool-call",
+        name: functionCall.name,
+        args: functionCall.args,
       });
-    } else {
-      return responseText;
+
+      const fn = availableFunctions[functionCall.name];
+      let result;
+      if (!fn) {
+        result = JSON.stringify({
+          error: `Unknown tool: ${functionCall.name}`,
+        });
+      } else {
+        try {
+          result = await fn(functionCall.args);
+        } catch (err) {
+          result = JSON.stringify({ error: err.message ?? String(err) });
+        }
+      }
+
+      onEvent({ type: "tool-result", name: functionCall.name, result });
+
+      functionResponseParts.push({
+        functionResponse: {
+          name: functionCall.name,
+          id: functionCall.id,
+          response: { result },
+        },
+      });
+    }
+
+    try {
+      response = await chat.sendMessage({ message: functionResponseParts });
+    } catch (err) {
+      const message = `Sorry, I couldn't reach the model: ${err.message ?? err}`;
+      onEvent({ type: "error", message });
+      return message;
     }
   }
+
+  const message = "Reached max iterations without a final answer.";
+  console.log(message);
+  onEvent({ type: "error", message });
+  return message;
 }
 
-console.log(
-  await agent(
-    "What are some activity ideas that I can do this afternoon based on my location and weather?",
-  ),
-);
+// Browser UI (index.html) wires itself up; the Node CLI path only runs
+// the demo query when executed directly with `node index.js`.
+if (!isBrowser) {
+  const finalContent = await agent(
+    "What's the current weather in my current location?",
+  );
+  console.log(finalContent);
+}
